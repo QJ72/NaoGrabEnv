@@ -5,8 +5,10 @@ from isaaclab.assets.rigid_object.rigid_object import RigidObject
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
+from isaaclab.markers.visualization_markers import VisualizationMarkers
+from isaaclab.utils.math import combine_frame_transforms
 
-from .grab_env_cfg import NaoGrabEnvCfg
+from .nao_grab_env_cfg import NaoGrabEnvCfg
 
 class NaoGrabEnv(DirectRLEnv):
     cfg:NaoGrabEnvCfg
@@ -18,11 +20,14 @@ class NaoGrabEnv(DirectRLEnv):
 
         self._previous_actions = torch.zeros(self.num_envs, 16, device=self.device)
 
-        self._list_of_joints = torch.Tensor([
+        self._list_of_joints = [
             "LHipPitch", "RHipPitch", "LShoulderPitch", "LShoulderRoll", "LElbowYaw",
             "LElbowRoll", "LWristYaw","LHand",  "LFinger11",
             "LFinger21", "LThumb1", "LFinger12","LFinger22",
-            "LFinger13", "LFinger23", "LThumb2"]) #Follow the order in NAO_CFG
+            "LFinger13", "LFinger23", "LThumb2"] #Follow the order in NAO_CFG
+        
+        self.goal_local = torch.zeros(self.num_envs, 3, device=self.device)
+        self.goal_world = torch.zeros_like(self.goal_local)
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot)
@@ -33,8 +38,7 @@ class NaoGrabEnv(DirectRLEnv):
         self.scene.rigid_objects["ball"] = self.ball
         self.scene.rigid_objects["box"] = self.box
 
-        self.marker = RigidObject(self.cfg.marker)
-        self.scene.rigid_objects["marker"] = self.marker
+        self.marker = VisualizationMarkers(self.cfg.marker)
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -72,15 +76,16 @@ class NaoGrabEnv(DirectRLEnv):
 
         distance_hand_ball = self._distance_hand_to_ball(ball_pos)
 
-        marker_pos = self.marker.data.root_state_w[:, :3] - self.robot.data.root_state_w[:, :3]
+        goal_pos = self.goal_world - self.robot.data.root_pos_w
 
-        distance_ball_marker = self._distance_ball_to_marker(ball_pos, marker_pos)
+        distance_ball_marker = self._distance_ball_to_marker(ball_pos, goal_pos)
 
         obs = torch.cat([
             joint_pos,
             joint_vel,
             previous_actions,
             ball_pos,
+            goal_pos,
             distance_hand_ball,
             distance_ball_marker,
         ], dim=-1)
@@ -117,7 +122,6 @@ class NaoGrabEnv(DirectRLEnv):
         base_height = self.robot.data.root_state_w[:, 2]
         if base_height < 0.15 :
             return True
-
         return False
     
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -125,6 +129,28 @@ class NaoGrabEnv(DirectRLEnv):
         terminate = self._get_terminate()
         #terminate = base_height < 0
         return terminate, time_out
+    
+    def sample_goal_pos(self, env_ids: torch.Tensor):
+        x = torch.rand(len(env_ids), device=self.device) * (0.30 - 0.10) + 0.10    # [0.20, 0.10]
+        y = torch.rand(len(env_ids), device=self.device) * 0.10
+        z = torch.rand(len(env_ids), device=self.device) * 0.2
+
+        goal_local = torch.stack([x, y, z], dim=-1)
+
+        # Update only for the reset envs
+        self.goal_local[env_ids] = goal_local
+
+        # Transform to world frame
+        root_pos = self.robot.data.root_pos_w[env_ids]
+        root_quat = self.robot.data.root_quat_w[env_ids]
+
+        goal_world, _ = combine_frame_transforms(root_pos, root_quat, goal_local)
+
+        self.goal_world[env_ids] = goal_world
+
+        # Visualize (can visualize all or just the updated ones depending on marker implementation)
+        self.marker.visualize(self.goal_world)
+
     
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -140,9 +166,11 @@ class NaoGrabEnv(DirectRLEnv):
         joint_pos = self.robot.data.default_joint_pos[env_ids]
         joint_vel = self.robot.data.default_joint_vel[env_ids]
 
-        #default_root_state = self.robot.data.default_root_state[env_ids]
-        #default_root_state[:, :3] += self.terrain.env_origins[env_ids]
-        #self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
-        #self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+        default_root_state = self.robot.data.default_root_state[env_ids]
+        default_root_state[:, :3] += self.terrain.env_origins[env_ids]
+        self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
+        self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
 
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+        self.previous_joints_pos = self.robot.data.joint_pos.clone()
+        self.sample_goal_pos(env_ids)

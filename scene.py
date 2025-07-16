@@ -17,9 +17,6 @@
 
 import argparse
 
-import gymnasium
-from env.grab_env_cfg import NaoGrabEnvCfg
-
 from isaaclab.app import AppLauncher
 
 # create argparser
@@ -35,11 +32,15 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 from isaaclab.sim import SimulationCfg, SimulationContext
+import gymnasium
+from env.nao_grab_env_cfg import NaoGrabEnvCfg
+
+import register_env
 
 def main():
     """Main function."""
 
-    gymnasium.make("NAOWalk-v0", cfg=NaoGrabEnvCfg())
+    gymnasium.make("NaoGrabEnv-v0", cfg=NaoGrabEnvCfg())
 
     # Initialize the simulation context
     sim_cfg = SimulationCfg(dt=0.01)
