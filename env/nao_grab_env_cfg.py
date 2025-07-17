@@ -64,7 +64,6 @@ class NaoGrabEnvCfg(DirectRLEnvCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.2, 0.1, 0.216)),
     )
 
     box: RigidObjectCfg = RigidObjectCfg(

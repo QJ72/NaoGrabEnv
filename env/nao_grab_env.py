@@ -1,5 +1,8 @@
 import numpy as np
 import torch
+import random
+
+import omni
 
 from isaaclab.assets.rigid_object.rigid_object import RigidObject
 import isaaclab.sim as sim_utils
@@ -28,6 +31,9 @@ class NaoGrabEnv(DirectRLEnv):
         
         self.goal_local = torch.zeros(self.num_envs, 3, device=self.device)
         self.goal_world = torch.zeros_like(self.goal_local)
+
+        self.ball_local = torch.zeros(self.num_envs, 3, device=self.device)
+        self.ball_world = torch.zeros_like(self.goal_local)
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot)
@@ -72,7 +78,7 @@ class NaoGrabEnv(DirectRLEnv):
         joint_pos = self._joint_pos() # (num_envs, 16)
         joint_vel = self.robot.data.joint_vel               # (num_envs, 16)
         previous_actions = self._previous_actions           # (num_envs, 16)
-        ball_pos = self.ball.data.root_state_w[:, :3] - self.robot.data.root_state_w[:, :3]
+        ball_pos = self.ball_world - self.robot.data.root_pos_w
 
         distance_hand_ball = self._distance_hand_to_ball(ball_pos)
 
@@ -130,10 +136,30 @@ class NaoGrabEnv(DirectRLEnv):
         #terminate = base_height < 0
         return terminate, time_out
     
+    def sample_ball_pos(self, env_ids: torch.Tensor):
+        x = torch.rand(len(env_ids), device=self.device) * (0.30 - 0.10) + 0.10    # [0.20, 0.10]
+        y = torch.rand(len(env_ids), device=self.device) * (0.20 - 0.10) + 0.10
+        z = torch.rand(len(env_ids), device=self.device) * 0.216
+
+        ball_local = torch.stack([x, y, z], dim=-1)
+
+        # Update only for the reset envs
+        self.ball_local[env_ids] = ball_local
+
+        # Transform to world frame
+        root_pos = self.robot.data.root_pos_w[env_ids]
+        root_quat = self.robot.data.root_quat_w[env_ids]
+
+        ball_world, _ = combine_frame_transforms(root_pos, root_quat, ball_local)
+
+        self.ball_world[env_ids] = ball_world
+
+        self.ball.set_world_poses(ball_local[env_ids], env_ids=env_ids)
+    
     def sample_goal_pos(self, env_ids: torch.Tensor):
         x = torch.rand(len(env_ids), device=self.device) * (0.30 - 0.10) + 0.10    # [0.20, 0.10]
-        y = torch.rand(len(env_ids), device=self.device) * 0.10
-        z = torch.rand(len(env_ids), device=self.device) * 0.2
+        y = torch.rand(len(env_ids), device=self.device) * (0.20 - 0.10) + 0.10    # [0.20, 0.10]
+        z = torch.rand(len(env_ids), device=self.device) * 0.216
 
         goal_local = torch.stack([x, y, z], dim=-1)
 
@@ -151,6 +177,19 @@ class NaoGrabEnv(DirectRLEnv):
         # Visualize (can visualize all or just the updated ones depending on marker implementation)
         self.marker.visualize(self.goal_world)
 
+    def sample_ball_color(self, env_ids: torch.Tensor):
+        red = random.random()
+        green = random.random()
+        blue = random.random()
+
+        colors = torch.Tensor(red, green, blue)
+        for i, env_id in enumerate(env_ids):
+            prim_path = f"/World/envs/env_{env_id}/Ball"
+            stage = omni.usd.get_context().get_stage()
+            prim = stage.GetPrimAtPath(prim_path)
+            if prim:
+                material = prim.GetAttribute("material:diffuse_color")
+                material.Set(colors[i].tolist())
     
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -174,3 +213,4 @@ class NaoGrabEnv(DirectRLEnv):
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
         self.previous_joints_pos = self.robot.data.joint_pos.clone()
         self.sample_goal_pos(env_ids)
+        self.sample_ball_pos(env_ids)
