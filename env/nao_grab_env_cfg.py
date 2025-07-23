@@ -6,11 +6,12 @@ import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.terrains import TerrainImporterCfg
-from isaaclab.sim import PhysxCfg, SimulationCfg
+from isaaclab.sim import PhysxCfg, SimulationCfg, PinholeCameraCfg
 from isaaclab.utils import configclass
 from isaaclab.assets import ArticulationCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.sensors import CameraCfg, ContactSensorCfg
 import torch
 
 from .NAO_CFG import NAO_CFG
@@ -64,18 +65,20 @@ class NaoGrabEnvCfg(DirectRLEnvCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
         ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.3, 0.1, 0.216)),
+
     )
 
     box: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Box",
         spawn=sim_utils.CuboidCfg(
-            size=(0.2, 0.2, 0.2),
+            size=(0.4, 0.4, 0.2),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             mass_props=sim_utils.MassPropertiesCfg(mass=1),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.2, 0, 0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.4, 0, 0)),
     )
 
     marker = VisualizationMarkersCfg(
