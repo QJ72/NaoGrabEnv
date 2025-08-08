@@ -11,22 +11,28 @@ from isaaclab.utils import configclass
 from isaaclab.assets import ArticulationCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.sensors import CameraCfg, ContactSensorCfg
+from isaaclab.sensors import FrameTransformerCfg
+from isaaclab.markers import FRAME_MARKER_CFG
+from isaaclab.markers import VisualizationMarkersCfg
+
 import torch
 
 from .NAO_CFG import NAO_CFG
 
+FRAME_MARKER_SMALL_CFG = FRAME_MARKER_CFG.copy()
+FRAME_MARKER_SMALL_CFG.markers["frame"].scale = (0.02, 0.02, 0.02)
+
 @configclass
 class NaoGrabEnvCfg(DirectRLEnvCfg):
-    episode_length_s = 10.0 #arbitrary
+    episode_length_s = 5.0 #arbitrary
 
     decimation = 4
 
-    observation_space = 51
-    action_space = 17
+    observation_space = 48
+    action_space = 14
     state_space = 0
 
-    action_scale = 0.25
+    action_scale = 0.1
 
     early_termination = True
 
@@ -65,7 +71,7 @@ class NaoGrabEnvCfg(DirectRLEnvCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.3, 0.1, 0.216)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.2, 0.1, 0.22)),
 
     )
 
@@ -78,7 +84,7 @@ class NaoGrabEnvCfg(DirectRLEnvCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.4, 0, 0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.35, 0, 0)),
     )
 
     marker = VisualizationMarkersCfg(
@@ -91,7 +97,19 @@ class NaoGrabEnvCfg(DirectRLEnvCfg):
         )
 
     scene:InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=12, env_spacing=4.0, replicate_physics=True
+        num_envs = 2048, env_spacing = 4.0, replicate_physics = True
     )
 
     robot:ArticulationCfg = NAO_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+
+    end_effector: FrameTransformerCfg = FrameTransformerCfg(
+        prim_path="/World/envs/env_.*/Robot/base_link",
+        debug_vis=True,
+        visualizer_cfg=FRAME_MARKER_SMALL_CFG.replace(prim_path="/Visuals/EndEffectorFrameTransformer"),
+        target_frames=[
+            FrameTransformerCfg.FrameCfg(
+                prim_path="/World/envs/env_.*/Robot/l_gripper",
+                name="tcp"
+            )
+        ]
+    )

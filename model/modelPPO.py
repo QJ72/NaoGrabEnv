@@ -12,7 +12,7 @@ class Actor(nn.Module):
         super().__init__()
 
         #if norm is set true, the model will adapt layer norm
-        self.layers, feature_dim = make_mlp_layers(in_dim, hidden_dims, activate_function=F.silu, norm=True)
+        self.layers, feature_dim = make_mlp_layers(in_dim, hidden_dims, activate_function=nn.SiLU(), norm=True)
 
         #if max action is setted, normal distribution will be scaled tanh transformed.
         #if state_dependent_std is True, log std will be learned from obs
@@ -30,7 +30,7 @@ class Critic(nn.Module):
         super().__init__()
 
         #if norm is set true, the model will adapt layer norm
-        self.layers, feature_dim = make_mlp_layers(in_dim, hidden_dims, activate_function=F.silu, norm=True)
+        self.layers, feature_dim = make_mlp_layers(in_dim, hidden_dims, activate_function=nn.SiLU(), norm=True)
 
         self.head = CriticHead(feature_dim)
 

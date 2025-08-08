@@ -26,7 +26,9 @@ import numpy as np
 from RLAlg.alg.sac import SAC
 from RLAlg.buffer.replay_buffer import ReplayBuffer
 from RLAlg.nn.steps import StochasticContinuousPolicyStep, DiscretePolicyStep, ValueStep
-from model.modelPPO import Actor, Critic
+from model.modelSAC import Actor, Critic
+
+import register_env
 
 from env.nao_grab_env_cfg import NaoGrabEnvCfg
 
@@ -48,13 +50,14 @@ class Trainer:
         self.buffer_steps = 1000
         self.rollout_steps = self.steps
 
-        self.max_action = torch.from_numpy(self.envs.single_action_space.high).float()
-        obs_space = self.envs.single_observation_space.shape
-        action_space = self.envs.single_action_space.shape
+        obs_space = self.envs.observation_space.shape
+        action_space = self.envs.action_space.shape
 
-        self.actor = Actor(np.prod(obs_space), np.prod(action_space), [128, 128], self.max_action)
-        self.critic = Critic(np.prod(obs_space), np.prod(action_space), [128, 128])
-        self.critic_target = Critic(np.prod(obs_space), np.prod(action_space), [128, 128])
+        self.action_dim = action_space[-1]
+
+        self.actor = Actor(self.obs_dim, self.action_dim, [128, 128]).to(self.device)
+        self.critic = Critic(self.obs_dim, self.action_dim, [128, 128]).to(self.device)
+        self.critic_target = Critic(self.obs_dim, self.action_dim, [128, 128]).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
         for param in self.critic_target.parameters():
@@ -64,9 +67,9 @@ class Trainer:
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=3e-4)
         
         self.replay_buffer = ReplayBuffer(self.env_nums, self.buffer_steps, device=self.device)
-        self.replay_buffer.create_storage_space("observations", obs_space, torch.float32)
-        self.replay_buffer.create_storage_space("next_observations", obs_space, torch.float32)
-        self.replay_buffer.create_storage_space("actions", action_space, torch.float32)
+        self.replay_buffer.create_storage_space("observations", (self.obs_dim, ), torch.float32)
+        self.replay_buffer.create_storage_space("next_observations", (self.obs_dim, ), torch.float32)
+        self.replay_buffer.create_storage_space("actions", (self.action_dim, ), torch.float32)
         self.replay_buffer.create_storage_space("rewards", (), torch.float32)
         self.replay_buffer.create_storage_space("dones", (), torch.float32)
 
@@ -80,15 +83,14 @@ class Trainer:
     
     @torch.no_grad()
     def get_action(self, obs:np.ndarray, random:bool=False):
-        obs = torch.from_numpy(obs).float().to(self.device)
         actor_step:Union[StochasticContinuousPolicyStep, DiscretePolicyStep]  = self.actor(obs)
         
         if random:
-            action = actor_step.action.uniform_(-1, 1) * self.max_action
+            action = actor_step.action.uniform_(-1, 1) * self.action_dim
         else:
             action = actor_step.action
             
-        return action.tolist()
+        return action
     
     def average_non_zero(self, numbers):
         non_zero_numbers = [num for num in numbers if num != 0]
@@ -129,6 +131,7 @@ class Trainer:
             done_batch = batch["dones"].to(self.device)
             
             self.critic_optimizer.zero_grad(set_to_none=True)
+            print(f"obs_batch: {obs_batch}, action_batch: {action_batch}")
             critic_loss = SAC.compute_critic_loss(self.actor, self.critic, self.critic_target, obs_batch, action_batch, reward_batch,
                                                   next_obs_batch, done_batch, self.alpha, self.gamma)
             critic_loss.backward()
@@ -139,7 +142,7 @@ class Trainer:
                 param.requires_grad = False
 
             self.actor_optimizer.zero_grad(set_to_none=True)
-            actor_loss = SAC.compute_actor_loss(self.actor, self.critic, obs_batch.detach(), self.alpha, self.regularization_weight)
+            actor_loss = SAC.compute_policy_loss(self.actor, self.critic, obs_batch.detach(), self.alpha, self.regularization_weight)
             actor_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
             self.actor_optimizer.step()
@@ -166,9 +169,10 @@ class Trainer:
 def main():
     trainer = Trainer()
 
-    trainer.train()
+    trainer.train(num_epoch=500, num_iteration=20, batch_size=512*10)
 
     trainer.envs.close()
+    trainer.save_models()
 
 if __name__ == "__main__":
     main()

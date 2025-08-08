@@ -2,6 +2,8 @@ import numpy as np
 import torch
 import random
 
+import time 
+
 import os
 
 from isaaclab.assets.rigid_object.rigid_object import RigidObject
@@ -10,6 +12,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers.visualization_markers import VisualizationMarkers
 from isaaclab.utils.math import combine_frame_transforms
+from isaaclab.sensors import FrameTransformer
 
 from .nao_grab_env_cfg import NaoGrabEnvCfg
 
@@ -18,42 +21,55 @@ class NaoGrabEnv(DirectRLEnv):
 
     def __init__(self, cfg, render_mode = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
+
+        self.target_joints = torch.tensor(
+            [2,7,11,15,19,25, 23,24,26,32,33,38,39,34],
+            dtype=torch.long,
+            device=self.device
+        )
     
-        self._actions = torch.zeros(self.num_envs, 16, device=self.device)
+        self._actions = torch.zeros(self.num_envs, len(self.target_joints), device=self.device)
 
-        self._previous_actions = torch.zeros(self.num_envs, 16, device=self.device)
-
-        self._list_of_joints = [
-            "LHipPitch", "RHipPitch", "LShoulderPitch", "LShoulderRoll", "LElbowYaw",
-            "LElbowRoll", "LWristYaw","LHand",  "LFinger11",
-            "LFinger21", "LThumb1", "LFinger12","LFinger22",
-            "LFinger13", "LFinger23", "LThumb2"] #Follow the order in NAO_CFG
+        self._previous_actions = torch.zeros_like(self._actions)
         
         self.goal_local = torch.zeros(self.num_envs, 3, device=self.device)
         self.goal_world = torch.zeros_like(self.goal_local)
 
-        for i in range(self.num_envs):
-            self.goal_local[i] = self._generate_goal_local(torch.tensor([i], device=self.device))
-            self.goal_world[i] = self._local_to_global_position(self.goal_local[i], i)
-
-        self.marker.visualize(self.goal_world)
 
         self.ball_local = torch.zeros(self.num_envs, 3, device=self.device)
         self.ball_world = torch.zeros_like(self.goal_local)
 
-        for i in range(self.num_envs):
-            self.ball_local[i] = self._generate_ball_local(torch.tensor([i], device=self.device))
-            self.ball_world[i] = self._local_to_global_position(self.goal_local[i], i)
+        self._processed_actions = torch.zeros(self.num_envs, 
+                                                   self.robot.data.joint_pos.shape[1], 
+                                                   device=self.device)
 
-
-    def _local_to_global_position(self, local_pos: torch.Tensor, env_id: int) -> torch.Tensor:
+    def _local_to_global_position(self, local_pos: torch.Tensor, envs_id: torch.Tensor) -> torch.Tensor:
         """Convert local position to global position based on the robot's root position."""
-        return local_pos + torch.tensor([
-            self.robot.data.root_pos_w[env_id, 0],
-            self.robot.data.root_pos_w[env_id, 1],
-            0.0
-        ], device=self.device)
+        #print(f"envs_id: {envs_id}, type: {type(envs_id)}")
+        #print(f"local_pos: {local_pos}, type: {type(local_pos)}")
+        idx = None
+        if envs_id.__class__ == int:
+            idx = envs_id
+            #print(f"Single envs_id: {idx}")
+        elif isinstance(envs_id, torch.Tensor) and envs_id.numel() == 1:
+            idx = int(envs_id.cpu().item())
+            #print(f"Single-element envs_id: {idx}")
+        if idx is not None:
+            #print(f"Using idx: {idx}")
+            #print(f"Root position: {self.robot.data.root_pos_w[idx]}")
 
+            final_local_pos = local_pos.clone().to(self.device) + torch.tensor([
+                    self.robot.data.root_pos_w[idx][0],
+                    self.robot.data.root_pos_w[idx][1],
+                    0.0
+                ], device=self.device)
+            return final_local_pos
+        local_pos = local_pos.clone().to(self.device)
+        for i in range(len(envs_id)):
+            local_pos[i, 0] += self.robot.data.root_pos_w[envs_id[i], 0]
+            local_pos[i, 1] += self.robot.data.root_pos_w[envs_id[i], 1]
+        return local_pos
+    
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self.robot
@@ -62,6 +78,10 @@ class NaoGrabEnv(DirectRLEnv):
         self.box = RigidObject(self.cfg.box)
         self.scene.rigid_objects["ball"] = self.ball
         self.scene.rigid_objects["box"] = self.box
+
+        self.end_frame = FrameTransformer(self.cfg.end_effector)
+        self.scene.sensors["frame"] = self.end_frame
+        self.end_effector_marker = VisualizationMarkers(self.cfg.marker)
 
         self.marker = VisualizationMarkers(self.cfg.marker)
         
@@ -76,56 +96,71 @@ class NaoGrabEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        self.previous_joints_pos = self.robot.data.joint_pos.clone()
         self._actions = actions.clone()
-        self._processed_actions = self.cfg.action_scale * self._actions + self.robot.data.default_joint_pos[self._list_of_joints] #modif
+        #print(f"Actions: {self._actions}")
+        full_actions = torch.zeros_like(self.robot.data.default_joint_pos, device=self.device)
+        full_actions[:, self.target_joints] = self._actions
+        self._processed_actions = self.cfg.action_scale * full_actions + self.robot.data.joint_pos
+        #print(f"joints position: {self.robot.data.joint_pos[:, self._indice_joints]}")
+        #print(f"Processed actions: {self._processed_actions}")
+        #print(self._processed_actions)
 
     def _apply_action(self):
-        self.robot.set_joint_position_target(self._processed_actions)
 
-    def _joint_pos(self) -> torch.Tensor:
-        return self.robot.data.joint_pos[self._list_of_joints] - self.robot.data.default_joint_pos[self._list_of_joints]
-
-    def _distance_hand_to_ball(self, ball_pos) -> torch.Tensor:
-        return torch.norm(ball_pos - self._joint_pos()["LHand"])
-
-    def _distance_ball_to_marker(self, ball_pos, marker_pos) -> torch.Tensor:
-        return torch.norm(ball_pos - marker_pos)    
+        self.robot.set_joint_position_target(self._processed_actions) 
 
     def _get_observations(self):
         self._previous_actions = self._actions.clone()
 
-        joint_pos = self._joint_pos() # (num_envs, 16)
-        joint_vel = self.robot.data.joint_vel               # (num_envs, 16)
-        previous_actions = self._previous_actions           # (num_envs, 16)
-        ball_pos = self.ball_world - self.robot.data.root_pos_w
+        joint_pos = self.robot.data.joint_pos- self.robot.data.default_joint_pos
 
-        distance_hand_ball = self._distance_hand_to_ball(ball_pos)
 
-        goal_pos = self.goal_world - self.robot.data.root_pos_w
+        joint_pos = joint_pos[:, self.target_joints] # (num_envs, 16)
 
-        distance_ball_marker = self._distance_ball_to_marker(ball_pos, goal_pos)
+        joint_vel = self.robot.data.joint_vel[:, self.target_joints]            # (num_envs, 16)
+        ball_pos = self.ball_world # (num_envs, 3)
+
+        ee_pos = self.end_frame.data.target_pos_w.squeeze(1)
+
+        #print(f"goal world: {self.goal_world}, Robot root position: {self.robot.data.root_pos_w}")
+        #goal_pos = self.goal_world - self.robot.data.root_pos_w
 
         obs = torch.cat([
             joint_pos,
             joint_vel,
-            previous_actions,
+            self._previous_actions,
             ball_pos,
-            goal_pos,
-            distance_hand_ball,
-            distance_ball_marker,
+            ee_pos,
+            #goal_pos,
         ], dim=-1)
 
 
-        return {"policy": obs}
+        return obs
 
     def _get_rewards(self) -> torch.Tensor:
-        return (
-            self._no_motion_reward() +
-            -0.2 * self._get_action_rate_reward() +
-            -0.05 * self._joint_velocity_penalty() +
-            - self._distance_hand_to_ball() +
-            - self._distance_ball_to_marker()
-        )
+        ee_pos = self.end_frame.data.target_pos_w.squeeze(1)
+
+        #print(f"End effector position: {ee_pos}")
+        #print(f"Ball world position: {self.ball_world}")
+        self.marker.visualize(self.ball_world)
+
+        distance_hand_ball = torch.norm(ee_pos - self.ball_world, dim=1)
+        #print(f"distance: {distance_hand_ball}")
+
+        scale = 0.2
+        reward_tracking_pos = 5.0 * distance_hand_ball
+
+        time.sleep(0.5)
+
+        success_bonus = (distance_hand_ball < 0.1).float() * 2.0
+
+        #self.distance_ball_marker = self._distance(self.ball_world, self.goal_world)
+
+        #reward = self._no_motion_reward() + (-0.01 * self._get_action_rate_reward()) + (-0.001 * self._joint_velocity_penalty()) + 5*reward_tracking_pos
+        reward = reward_tracking_pos + success_bonus
+
+        return reward
 
     def _no_motion_reward(self) -> torch.Tensor:
         lin_vel = torch.norm(self.robot.data.root_lin_vel_b, dim=1)
@@ -140,42 +175,67 @@ class NaoGrabEnv(DirectRLEnv):
     def _joint_velocity_penalty(self) -> torch.Tensor:
         return torch.norm(self.robot.data.joint_vel, dim=1)
     
-    def _get_terminate(self):
+    def _get_terminate(self) -> bool:
         ball_height = self.ball.data.root_state_w[:, 2]
-        if ball_height < 0.05 :
-            return True
         base_height = self.robot.data.root_state_w[:, 2]
-        if base_height < 0.15 :
-            return True
-        return False
+
+        terminate = (ball_height < 0.05) | (base_height < 0.2)
+
+        return terminate
     
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         terminate = self._get_terminate()
-        #terminate = base_height < 0
         return terminate, time_out
-    
-    def _generate_ball_local(self, env_ids: torch.Tensor) -> torch.Tensor:
-        x = torch.rand(len(env_ids), device=self.device) * 0.15 + 0.15
-        y = torch.rand(len(env_ids), device=self.device)* (-0.1)  # [-0.10, 0]
-        z = torch.tensor([0.216 for _ in range(len(env_ids))], device=self.device)  # Constant height
-
-        return torch.stack([x, y, z], dim=-1)
     
     def sample_ball_pos(self, env_ids: torch.Tensor):
 
-        ball_local = self._generate_ball_local(env_ids)
+        x = torch.rand(len(env_ids), device=self.device)*0.1 + 0.2 #torch.rand(len(env_ids), device=self.device) * 0.15 + 0.15
+        y = torch.rand(len(env_ids), device=self.device)*0.15 +0.1 #torch.rand(len(env_ids), device=self.device)* (-0.1)  # [-0.10, 0]
+        z = torch.ones(len(env_ids), device=self.device)*0.22 # Constant height
 
+
+        ball_local = torch.stack([x, y, z], dim=-1)
+
+        #print(f"Ball local: {ball_local}")
         # Update only for the reset envs
         self.ball_local[env_ids] = ball_local
 
         ball_world = self._local_to_global_position(ball_local, env_ids)
 
-        self.ball.set_world_poses(positions=ball_world[env_ids], env_ids=env_ids)
-    
+        self.ball_world[env_ids] = ball_world
+        
+        default_quat = self.ball.data.default_root_state[env_ids, 3:7]
+
+        ball_pose = torch.cat([ball_world, default_quat], dim=1)
+
+        self.ball.write_root_pose_to_sim(ball_pose, env_ids=env_ids)
+
+        default_velocity = torch.zeros(len(env_ids), 6, device=self.device)
+        self.ball.write_root_velocity_to_sim(default_velocity, env_ids=env_ids)
+
+    def reset_box_pos(self, env_ids: torch.Tensor | None = None):
+        box_start_position = self.box.data.default_root_state[env_ids, :7]  # Only position + quaternion
+        #print(f"Box start position: {box_start_position}")
+        #print(f"env_ids: {env_ids}, type: {type(env_ids)}")
+        #print(f"Terrain origins: {self.terrain.env_origins}")
+        if env_ids.numel() == 1:
+            #print(f"box start position before adjustment: {box_start_position[0, 0]}, {box_start_position[0, 1]}")
+            #print(f"Terrain origin for env {env_ids[0]}: {self.terrain.env_origins[env_ids, 0]}")
+            box_start_position[0, 0] += self.terrain.env_origins[env_ids[0], 0]
+            box_start_position[0, 1] += self.terrain.env_origins[env_ids[0], 1]
+        else:
+            # For multiple environments, adjust the box position for each environment
+            for i in range(len(env_ids)):
+                box_start_position[i, 0] += self.terrain.env_origins[env_ids[i]][0]
+                box_start_position[i, 1] += self.terrain.env_origins[env_ids[i]][1]
+
+        self.box.write_root_pose_to_sim(box_start_position, env_ids=env_ids)
+
+
     def _generate_goal_local(self, env_ids: torch.Tensor) -> torch.Tensor:
-        x = torch.rand(len(env_ids), device=self.device) * 0.2 + 0.2   # [0.30, 0.15]
-        y = torch.rand(len(env_ids), device=self.device) * 0    # [0.20, 0.10]
+        x = torch.tensor([0.2 for _ in range(len(env_ids))], device=self.device) #torch.rand(len(env_ids), device=self.device) * 0.2 + 0.2   # [0.30, 0.15]
+        y = torch.tensor([0.15 for _ in range(len(env_ids))], device=self.device) #torch.rand(len(env_ids), device=self.device) * 0    # [0.20, 0.10]
         z = torch.tensor([0.216 for _ in range(len(env_ids))], device=self.device)  # Constant height
 
         return torch.stack([x, y, z], dim=-1)
@@ -183,24 +243,15 @@ class NaoGrabEnv(DirectRLEnv):
     def sample_goal_pos(self, env_ids: torch.Tensor):
         goal_local = self._generate_goal_local(env_ids)
 
+        #print(f"Goal local: {goal_local}")
+
         # Update only for the reset envs
         self.goal_local[env_ids] = goal_local
 
-        goal_world = self._local_to_global_position(goal_local, env_ids)
+        self.goal_world[env_ids] = self._local_to_global_position(goal_local, env_ids)
 
         # Visualize (can visualize all or just the updated ones depending on marker implementation)
-        self.marker.visualize(self.goal_world)
-
-    #Not finished but may not be needed
-    def sample_ball_color(self, env_ids: torch.Tensor):
-        red = random.random()
-        green = random.random()
-        blue = random.random()
-
-        colors = torch.Tensor(red, green, blue)
-        for i, env_id in enumerate(env_ids):
-            visual_material = self.ball.spawner_cfg.visual_materials
-            visual_material.diffuse_color = colors[i].tolist
+        self.marker.visualize(self.goal_world[env_ids])
     
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -224,4 +275,5 @@ class NaoGrabEnv(DirectRLEnv):
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
         self.previous_joints_pos = self.robot.data.joint_pos.clone()
         self.sample_goal_pos(env_ids)
+        self.reset_box_pos(env_ids)
         self.sample_ball_pos(env_ids)
